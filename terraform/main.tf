@@ -1,18 +1,289 @@
-resource "aws_glue_catalog_database" "example" {
+resource "random_id" "id" {
+  byte_length = 8
+}
+
+# -----------------------------------------------------------------------------------------
+# VPC Configuration
+# -----------------------------------------------------------------------------------------
+
+module "vpc" {
+  source                = "./modules/vpc/vpc"
+  vpc_name              = "vpc"
+  vpc_cidr_block        = "10.0.0.0/16"
+  enable_dns_hostnames  = true
+  enable_dns_support    = true
+  internet_gateway_name = "vpc_igw"
+}
+
+# Security Group
+module "redshift_security_group" {
+  source = "./modules/vpc/security_groups"
+  vpc_id = module.vpc.vpc_id
+  name   = "redshift-security-group"
+  ingress = [
+    {
+      from_port       = 5439
+      to_port         = 5439
+      protocol        = "tcp"
+      self            = "false"
+      cidr_blocks     = ["0.0.0.0/0"]
+      security_groups = []
+      description     = "any"
+    }
+  ]
+  egress = [
+    {
+      from_port   = 0
+      to_port     = 0
+      protocol    = "-1"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
+  ]
+}
+
+# Public Subnets
+module "public_subnets" {
+  source = "./modules/vpc/subnets"
+  name   = "public-subnet"
+  subnets = [
+    {
+      subnet = "10.0.1.0/24"
+      az     = "us-east-1a"
+    },
+    {
+      subnet = "10.0.2.0/24"
+      az     = "us-east-1b"
+    },
+    {
+      subnet = "10.0.3.0/24"
+      az     = "us-east-1c"
+    }
+  ]
+  vpc_id                  = module.vpc.vpc_id
+  map_public_ip_on_launch = true
+}
+
+# Private Subnets
+module "private_subnets" {
+  source = "./modules/vpc/subnets"
+  name   = "private-subnet"
+  subnets = [
+    {
+      subnet = "10.0.6.0/24"
+      az     = "us-east-1d"
+    },
+    {
+      subnet = "10.0.5.0/24"
+      az     = "us-east-1e"
+    },
+    {
+      subnet = "10.0.4.0/24"
+      az     = "us-east-1f"
+    }
+  ]
+  vpc_id                  = module.vpc.vpc_id
+  map_public_ip_on_launch = false
+}
+
+# Public Route Table
+module "public_rt" {
+  source  = "./modules/vpc/route_tables"
+  name    = "public-route-table"
+  subnets = module.public_subnets.subnets[*]
+  routes = [
+    {
+      cidr_block         = "0.0.0.0/0"
+      gateway_id         = module.vpc.igw_id
+      nat_gateway_id     = ""
+      transit_gateway_id = ""
+    }
+  ]
+  vpc_id = module.vpc.vpc_id
+}
+
+# Private Route Table
+module "private_rt" {
+  source  = "./modules/vpc/route_tables"
+  name    = "private-route-table"
+  subnets = module.private_subnets.subnets[*]
+  routes  = []
+  vpc_id  = module.vpc.vpc_id
+}
+
+# -----------------------------------------------------------------------------------------
+# S3 Configuration
+# -----------------------------------------------------------------------------------------
+module "source_bucket" {
+  source             = "./modules/s3"
+  bucket_name        = "source-bucket-${random_id.id.hex}"
+  objects            = []
+  versioning_enabled = "Enabled"
+  cors = [
+    {
+      allowed_headers = ["*"]
+      allowed_methods = ["PUT"]
+      allowed_origins = ["*"]
+      max_age_seconds = 3000
+    }
+  ]
+  bucket_policy = ""
+  force_destroy = true
+  bucket_notification = {
+    queue           = []
+    lambda_function = []
+  }
+}
+
+module "glue_etl_script_bucket" {
+  source      = "./modules/s3"
+  bucket_name = "glue-etl-script-bucket-${random_id.id.hex}"
+  objects = [
+    {
+      key    = "etl_job.py"
+      source = "scripts/etl_job.py"
+    }
+  ]
+  versioning_enabled = "Enabled"
+  cors = [
+    {
+      allowed_headers = ["*"]
+      allowed_methods = ["PUT"]
+      allowed_origins = ["*"]
+      max_age_seconds = 3000
+    }
+  ]
+  bucket_policy = ""
+  force_destroy = true
+  bucket_notification = {
+    queue           = []
+    lambda_function = []
+  }
+}
+
+# -----------------------------------------------------------------------------------------
+# Redshift Configuration
+# -----------------------------------------------------------------------------------------
+module "redshift_serverless" {
+  source              = "./modules/redshift"
+  namespace_name      = "incremental-load-namespace"
+  admin_username      = "admin"
+  admin_user_password = "AdminPassword123!"
+  db_name             = "incremental-load-db"
+  workgroups = [
+    {
+      workgroup_name      = "incremental-load-workgroup"
+      base_capacity       = 128
+      publicly_accessible = false
+      subnet_ids          = module.private_subnets.subnets[*].id
+      security_group_ids  = [module.redshift_security_group.id]
+      config_parameters = [
+        {
+          parameter_key   = "enable_user_activity_logging"
+          parameter_value = "true"
+        }
+      ]
+    }
+  ]
+}
+
+# -----------------------------------------------------------------------------------------
+# Glue Configuration
+# -----------------------------------------------------------------------------------------
+resource "aws_glue_catalog_database" "database" {
   name = "MyCatalogDatabase"
 }
 
-resource "aws_glue_catalog_table" "aws_glue_catalog_table" {
+resource "aws_glue_catalog_table" "table" {
   name          = "MyCatalogTable"
-  database_name = "MyCatalogDatabase"
+  database_name = aws_glue_catalog_database.database.name
 }
 
-resource "aws_glue_crawler" "example" {
-  database_name = aws_glue_catalog_database.example.name
+resource "aws_glue_crawler" "crawler" {
+  database_name = aws_glue_catalog_database.database.name
   name          = "example"
   role          = aws_iam_role.example.arn
 
   s3_target {
-    path = "s3://${aws_s3_bucket.example.bucket}"
+    path = "s3://${module.source_bucket.bucket_name}"
+  }
+}
+
+resource "aws_glue_connection" "redshift_conn" {
+  name            = "redshift-connection"
+  description     = "Glue connection to Amazon Redshift"
+  connection_type = "JDBC"
+
+  # Connection properties for Redshift
+  connection_properties = {
+    JDBC_CONNECTION_URL = "jdbc:redshift://${module.redshift_serverless.endpoint}:5439/incremental-load-db"
+    USERNAME            = "admin"
+    PASSWORD            = "AdminPassword123!"
+    # Optionally, use AWS Secrets Manager for credentials
+    # SECRET_ID         = "<aws_secretsmanager_secret_arn>"
+  }
+
+  physical_connection_requirements {
+    subnet_id              = "<subnet-id>"
+    security_group_id_list = ["<security-group-id>"]
+    availability_zone      = "<optional-az>"
+  }
+}
+
+
+# IAM role for Glue jobs
+resource "aws_iam_role" "glue_job_role" {
+  name = "glue-job-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "glue.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_glue_job" "etl_job" {
+  name              = "etl-job"
+  description       = "Incremental load ETL job"
+  role_arn          = aws_iam_role.glue_job_role.arn
+  glue_version      = "5.0"
+  max_retries       = 0
+  timeout           = 2880
+  number_of_workers = 2
+  worker_type       = "G.1X"
+  connections       = [aws_glue_connection.redshift_conn.name]
+  execution_class   = "STANDARD"
+
+  command {
+    script_location = "s3://${module.glue_etl_script_bucket.bucket_name}/etl_job.py"
+    name            = "glueetl"
+    python_version  = "3"
+  }
+
+  notification_property {
+    notify_delay_after = 3 # delay in minutes
+  }
+
+  default_arguments = {
+    "--job-language"                     = "python"
+    "--continuous-log-logGroup"          = "/aws-glue/jobs"
+    "--enable-continuous-cloudwatch-log" = "true"
+    "--enable-continuous-log-filter"     = "true"
+    "--enable-metrics"                   = ""
+    "--enable-auto-scaling"              = "true"
+  }
+
+  execution_property {
+    max_concurrent_runs = 1
+  }
+
+  tags = {
+    "ManagedBy" = "AWS"
   }
 }
