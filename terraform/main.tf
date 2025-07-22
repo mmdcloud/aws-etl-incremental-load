@@ -140,7 +140,7 @@ module "glue_etl_script_bucket" {
   objects = [
     {
       key    = "etl_job.py"
-      source = "scripts/etl_job.py"
+      source = "../src/etl_job.py"
     }
   ]
   versioning_enabled = "Enabled"
@@ -189,22 +189,66 @@ module "redshift_serverless" {
 # -----------------------------------------------------------------------------------------
 # Glue Configuration
 # -----------------------------------------------------------------------------------------
+resource "aws_iam_role" "glue_crawler_role" {
+  name = "glue-crawler-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "glue.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "glue_service_policy" {
+  role       = aws_iam_role.glue_crawler_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole"
+}
+
+resource "aws_iam_role_policy" "s3_access_policy" {
+  role = aws_iam_role.glue_crawler_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Action = [
+          "s3:GetObject",
+          "s3:ListBucket"
+        ],
+        Resource = [
+          "${module.source_bucket.arn}",
+          "${module.source_bucket.arn}/*"
+        ]
+      }
+    ]
+  })
+}
+
 resource "aws_glue_catalog_database" "database" {
-  name = "MyCatalogDatabase"
+  name        = var.glue_database_name
+  description = "Glue database for incremental load"
 }
 
 resource "aws_glue_catalog_table" "table" {
-  name          = "MyCatalogTable"
+  name          = var.glue_table_name
   database_name = aws_glue_catalog_database.database.name
 }
 
 resource "aws_glue_crawler" "crawler" {
   database_name = aws_glue_catalog_database.database.name
-  name          = "example"
-  role          = aws_iam_role.example.arn
+  name          = var.glue_crawler_name
+  role          = aws_iam_role.glue_crawler_role.arn
 
   s3_target {
-    path = "s3://${module.source_bucket.bucket_name}"
+    path = "s3://${module.source_bucket.bucket}"
   }
 }
 
@@ -215,7 +259,7 @@ resource "aws_glue_connection" "redshift_conn" {
 
   # Connection properties for Redshift
   connection_properties = {
-    JDBC_CONNECTION_URL = "jdbc:redshift://${module.redshift_serverless.endpoint}:5439/incremental-load-db"
+    JDBC_CONNECTION_URL = "jdbc:redshift://${tostring(module.redshift_serverless.endpoint)}:5439/incremental-load-db"
     USERNAME            = "admin"
     PASSWORD            = "AdminPassword123!"
     # Optionally, use AWS Secrets Manager for credentials
@@ -223,9 +267,9 @@ resource "aws_glue_connection" "redshift_conn" {
   }
 
   physical_connection_requirements {
-    subnet_id              = "<subnet-id>"
-    security_group_id_list = ["<security-group-id>"]
-    availability_zone      = "<optional-az>"
+    subnet_id              = module.private_subnets.subnets[0].id
+    security_group_id_list = [module.redshift_security_group.id]
+    availability_zone      = module.private_subnets.subnets[0].availability_zone
   }
 }
 
@@ -261,7 +305,7 @@ resource "aws_glue_job" "etl_job" {
   execution_class   = "STANDARD"
 
   command {
-    script_location = "s3://${module.glue_etl_script_bucket.bucket_name}/etl_job.py"
+    script_location = "s3://${module.glue_etl_script_bucket.bucket}/etl_job.py"
     name            = "glueetl"
     python_version  = "3"
   }
@@ -275,7 +319,7 @@ resource "aws_glue_job" "etl_job" {
     "--continuous-log-logGroup"          = "/aws-glue/jobs"
     "--enable-continuous-cloudwatch-log" = "true"
     "--enable-continuous-log-filter"     = "true"
-    "--enable-metrics"                   = ""
+    "--enable-metrics"                   = "true"
     "--enable-auto-scaling"              = "true"
   }
 
