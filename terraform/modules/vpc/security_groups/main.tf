@@ -10,7 +10,7 @@ resource "aws_security_group" "security_group" {
       protocol    = ingress.value["protocol"]
       self        = ingress.value["self"]
       cidr_blocks = ingress.value["cidr_blocks"]
-      description = ingress.value["description"]
+      description = ingress.value["description"]      
       security_groups = ingress.value["security_groups"]
     }
   }

@@ -29,6 +29,15 @@ module "redshift_security_group" {
       cidr_blocks     = ["0.0.0.0/0"]
       security_groups = []
       description     = "any"
+    },
+    {
+      from_port       = 0
+      to_port         = 0
+      protocol        = "tcp"
+      self            = "true"
+      cidr_blocks     = ["0.0.0.0/0"]
+      security_groups = []
+      description     = "any"
     }
   ]
   egress = [
@@ -57,6 +66,18 @@ module "public_subnets" {
     {
       subnet = "10.0.3.0/24"
       az     = "us-east-1c"
+    },
+    {
+      subnet = "10.0.4.0/24"
+      az     = "us-east-1d"
+    },
+    {
+      subnet = "10.0.5.0/24"
+      az     = "us-east-1e"
+    },
+    {
+      subnet = "10.0.6.0/24"
+      az     = "us-east-1f"
     }
   ]
   vpc_id                  = module.vpc.vpc_id
@@ -69,16 +90,16 @@ module "private_subnets" {
   name   = "private-subnet"
   subnets = [
     {
-      subnet = "10.0.6.0/24"
-      az     = "us-east-1d"
+      subnet = "10.0.7.0/24"
+      az     = "us-east-1a"
     },
     {
-      subnet = "10.0.5.0/24"
-      az     = "us-east-1e"
+      subnet = "10.0.8.0/24"
+      az     = "us-east-1b"
     },
     {
-      subnet = "10.0.4.0/24"
-      az     = "us-east-1f"
+      subnet = "10.0.9.0/24"
+      az     = "us-east-1c"
     }
   ]
   vpc_id                  = module.vpc.vpc_id
@@ -109,6 +130,70 @@ module "private_rt" {
   routes  = []
   vpc_id  = module.vpc.vpc_id
 }
+
+# -----------------------------------------------------------------------------------------
+# VPC Endpoint Configuration
+# -----------------------------------------------------------------------------------------
+
+resource "aws_vpc_endpoint" "s3_endpoint" {
+  vpc_id            = module.vpc.vpc_id       
+  service_name      = "com.amazonaws.us-east-1.s3"
+  vpc_endpoint_type = "Gateway"                  
+  route_table_ids   = [aws_route_table.private.id]
+
+  tags = {
+    Name = "s3-endpoint"
+  }
+}
+
+resource "aws_vpc_endpoint" "kms_endpoint" {
+  vpc_id            = module.vpc.vpc_id    
+  service_name      = "com.amazonaws.us-east-1.kms"
+  vpc_endpoint_type = "Interface"                  
+  subnet_ids        = module.public_subnets.subnets[*].id
+  security_group_ids = [module.redshift_security_group.id]
+
+  tags = {
+    Name = "kms-endpoint"
+  }
+}
+
+resource "aws_vpc_endpoint" "sts_endpoint" {
+  vpc_id            = module.vpc.vpc_id    
+  service_name      = "com.amazonaws.us-east-1.sts"
+  vpc_endpoint_type = "Interface"                  
+  subnet_ids        = module.public_subnets.subnets[*].id
+  security_group_ids = [module.redshift_security_group.id]
+
+  tags = {
+    Name = "sts-endpoint"
+  }
+}
+
+resource "aws_vpc_endpoint" "redshift_endpoint" {
+  vpc_id            = module.vpc.vpc_id    
+  service_name      = "com.amazonaws.us-east-1.redshift"  
+  vpc_endpoint_type = "Interface"
+  subnet_ids        = module.public_subnets.subnets[*].id
+  security_group_ids = [module.redshift_security_group.id]
+
+  tags = {
+    Name = "redshift-endpoint"
+  }
+}
+
+resource "aws_vpc_endpoint" "secrets_manager_endpoint" {
+  vpc_id            = module.vpc.vpc_id    
+  service_name      = "com.amazonaws.us-east-1.secretsmanager"  
+  vpc_endpoint_type = "Interface"
+  subnet_ids        = module.public_subnets.subnets[*].id
+  security_group_ids = [module.redshift_security_group.id]
+
+  tags = {
+    Name = "secrets-manager-endpoint"
+  }
+}
+
 
 # -----------------------------------------------------------------------------------------
 # S3 Configuration
@@ -174,7 +259,7 @@ module "redshift_serverless" {
       workgroup_name      = "incremental-load-workgroup"
       base_capacity       = 128
       publicly_accessible = false
-      subnet_ids          = module.private_subnets.subnets[*].id
+      subnet_ids          = module.public_subnets.subnets[*].id
       security_group_ids  = [module.redshift_security_group.id]
       config_parameters = [
         {
@@ -267,9 +352,9 @@ resource "aws_glue_connection" "redshift_conn" {
   }
 
   physical_connection_requirements {
-    subnet_id              = module.private_subnets.subnets[0].id
+    subnet_id              = module.public_subnets.subnets[*].id
     security_group_id_list = [module.redshift_security_group.id]
-    availability_zone      = module.private_subnets.subnets[0].availability_zone
+    availability_zone      = module.public_subnets.subnets[*].availability_zone
   }
 }
 

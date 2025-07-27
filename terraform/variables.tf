@@ -20,5 +20,4 @@ variable "glue_crawler_name" {
   description = "The name of the Glue crawler"
   type        = string
   default     = "incremental_load_crawler"
-
 }
