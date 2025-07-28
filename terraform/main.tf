@@ -1,3 +1,8 @@
+# Registering vault provider
+data "vault_generic_secret" "redshift" {
+  path = "secret/redshift"
+}
+
 resource "random_id" "id" {
   byte_length = 8
 }
@@ -57,27 +62,27 @@ module "public_subnets" {
   subnets = [
     {
       subnet = "10.0.1.0/24"
-      az     = "us-east-1a"
+      az     = "${var.region}a"
     },
     {
       subnet = "10.0.2.0/24"
-      az     = "us-east-1b"
+      az     = "${var.region}b"
     },
     {
       subnet = "10.0.3.0/24"
-      az     = "us-east-1c"
+      az     = "${var.region}c"
     },
     {
       subnet = "10.0.4.0/24"
-      az     = "us-east-1d"
+      az     = "${var.region}d"
     },
     {
       subnet = "10.0.5.0/24"
-      az     = "us-east-1e"
+      az     = "${var.region}e"
     },
     {
       subnet = "10.0.6.0/24"
-      az     = "us-east-1f"
+      az     = "${var.region}f"
     }
   ]
   vpc_id                  = module.vpc.vpc_id
@@ -91,15 +96,15 @@ module "private_subnets" {
   subnets = [
     {
       subnet = "10.0.7.0/24"
-      az     = "us-east-1a"
+      az     = "${var.region}a"
     },
     {
       subnet = "10.0.8.0/24"
-      az     = "us-east-1b"
+      az     = "${var.region}b"
     },
     {
       subnet = "10.0.9.0/24"
-      az     = "us-east-1c"
+      az     = "${var.region}c"
     }
   ]
   vpc_id                  = module.vpc.vpc_id
@@ -136,10 +141,10 @@ module "private_rt" {
 # -----------------------------------------------------------------------------------------
 
 resource "aws_vpc_endpoint" "s3_endpoint" {
-  vpc_id            = module.vpc.vpc_id       
-  service_name      = "com.amazonaws.us-east-1.s3"
-  vpc_endpoint_type = "Gateway"                  
-  route_table_ids   = [aws_route_table.private.id]
+  vpc_id            = module.vpc.vpc_id
+  service_name      = "com.amazonaws.${var.region}.s3"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = [module.private_rt.id]
 
   tags = {
     Name = "s3-endpoint"
@@ -147,10 +152,10 @@ resource "aws_vpc_endpoint" "s3_endpoint" {
 }
 
 resource "aws_vpc_endpoint" "kms_endpoint" {
-  vpc_id            = module.vpc.vpc_id    
-  service_name      = "com.amazonaws.us-east-1.kms"
-  vpc_endpoint_type = "Interface"                  
-  subnet_ids        = module.public_subnets.subnets[*].id
+  vpc_id             = module.vpc.vpc_id
+  service_name       = "com.amazonaws.${var.region}.kms"
+  vpc_endpoint_type  = "Interface"
+  subnet_ids         = module.public_subnets.subnets[*].id
   security_group_ids = [module.redshift_security_group.id]
 
   tags = {
@@ -159,10 +164,10 @@ resource "aws_vpc_endpoint" "kms_endpoint" {
 }
 
 resource "aws_vpc_endpoint" "sts_endpoint" {
-  vpc_id            = module.vpc.vpc_id    
-  service_name      = "com.amazonaws.us-east-1.sts"
-  vpc_endpoint_type = "Interface"                  
-  subnet_ids        = module.public_subnets.subnets[*].id
+  vpc_id             = module.vpc.vpc_id
+  service_name       = "com.amazonaws.${var.region}.sts"
+  vpc_endpoint_type  = "Interface"
+  subnet_ids         = module.public_subnets.subnets[*].id
   security_group_ids = [module.redshift_security_group.id]
 
   tags = {
@@ -171,10 +176,10 @@ resource "aws_vpc_endpoint" "sts_endpoint" {
 }
 
 resource "aws_vpc_endpoint" "redshift_endpoint" {
-  vpc_id            = module.vpc.vpc_id    
-  service_name      = "com.amazonaws.us-east-1.redshift"  
-  vpc_endpoint_type = "Interface"
-  subnet_ids        = module.public_subnets.subnets[*].id
+  vpc_id             = module.vpc.vpc_id
+  service_name       = "com.amazonaws.${var.region}.redshift"
+  vpc_endpoint_type  = "Interface"
+  subnet_ids         = module.public_subnets.subnets[*].id
   security_group_ids = [module.redshift_security_group.id]
 
   tags = {
@@ -183,17 +188,16 @@ resource "aws_vpc_endpoint" "redshift_endpoint" {
 }
 
 resource "aws_vpc_endpoint" "secrets_manager_endpoint" {
-  vpc_id            = module.vpc.vpc_id    
-  service_name      = "com.amazonaws.us-east-1.secretsmanager"  
-  vpc_endpoint_type = "Interface"
-  subnet_ids        = module.public_subnets.subnets[*].id
+  vpc_id             = module.vpc.vpc_id
+  service_name       = "com.amazonaws.${var.region}.secretsmanager"
+  vpc_endpoint_type  = "Interface"
+  subnet_ids         = module.public_subnets.subnets[*].id
   security_group_ids = [module.redshift_security_group.id]
 
   tags = {
     Name = "secrets-manager-endpoint"
   }
 }
-
 
 # -----------------------------------------------------------------------------------------
 # S3 Configuration
@@ -251,8 +255,8 @@ module "glue_etl_script_bucket" {
 module "redshift_serverless" {
   source              = "./modules/redshift"
   namespace_name      = "incremental-load-namespace"
-  admin_username      = "admin"
-  admin_user_password = "AdminPassword123!"
+  admin_username      = data.vault_generic_secret.redshift.data["username"]
+  admin_user_password = data.vault_generic_secret.redshift.data["password"]
   db_name             = "incremental-load-db"
   workgroups = [
     {
@@ -345,16 +349,15 @@ resource "aws_glue_connection" "redshift_conn" {
   # Connection properties for Redshift
   connection_properties = {
     JDBC_CONNECTION_URL = "jdbc:redshift://${tostring(module.redshift_serverless.endpoint)}:5439/incremental-load-db"
-    USERNAME            = "admin"
-    PASSWORD            = "AdminPassword123!"
+    USERNAME            = "${data.vault_generic_secret.redshift.data["username"]}"
+    PASSWORD            = "${data.vault_generic_secret.redshift.data["password"]}"
     # Optionally, use AWS Secrets Manager for credentials
     # SECRET_ID         = "<aws_secretsmanager_secret_arn>"
   }
-
   physical_connection_requirements {
-    subnet_id              = module.public_subnets.subnets[*].id
+    subnet_id              = module.public_subnets.subnets[0].id
     security_group_id_list = [module.redshift_security_group.id]
-    availability_zone      = module.public_subnets.subnets[*].availability_zone
+    availability_zone      = module.public_subnets.subnets[0].availability_zone
   }
 }
 
@@ -375,6 +378,36 @@ resource "aws_iam_role" "glue_job_role" {
       }
     ]
   })
+}
+
+resource "aws_iam_role_policy_attachment" "glue_job_role_policy_redshift" {
+  role       = aws_iam_role.glue_job_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonRedshiftFullAccess"
+}
+
+resource "aws_iam_role_policy_attachment" "glue_job_role_policy_s3" {
+  role       = aws_iam_role.glue_job_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+}
+
+resource "aws_iam_role_policy_attachment" "glue_job_role_policy_console" {
+  role       = aws_iam_role.glue_job_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AWSGlueConsoleFullAccess"
+}
+
+resource "aws_iam_role_policy_attachment" "glue_job_role_policy_iam" {
+  role       = aws_iam_role.glue_job_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole"
+}
+
+resource "aws_iam_role_policy_attachment" "glue_job_role_policy_kms" {
+  role       = aws_iam_role.glue_job_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AWSKeyManagementServicePowerUser"
+}
+
+resource "aws_iam_role_policy_attachment" "secrets_manager_read_write" {
+  role       = aws_iam_role.glue_job_role.name
+  policy_arn = "arn:aws:iam::aws:policy/SecretsManagerReadWrite"
 }
 
 resource "aws_glue_job" "etl_job" {
